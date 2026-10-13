@@ -627,7 +627,8 @@ await runScenario('E. 静态帧预载按提交档位；不符（preview 回退�
   const probeImg = t.imageEls[t.imageEls.length-1];
   // ── 核心 1（本轮修复）：探针按提交档位准备，于是能真的被收编 ──
   check('静态帧探针按提交档位准备（?v=3，不再是无档位 URL）',
-    !!probeImg && t.mediaSrc(probeImg) === '/wallpaper-engine/scene-frame/s3?v=3',
+    !!probeImg && (() => { const u = String(t.mediaSrc(probeImg) || '');
+      return u.split('?')[0] === '/wallpaper-engine/scene-frame/s3' && u.includes('v=3'); })(),
     'src=' + String(probeImg && probeImg.src));
   if (probeImg && typeof probeImg.onload === 'function') probeImg.onload();
   const layer = t.layerEl();
@@ -649,7 +650,8 @@ await runScenario('E. 静态帧预载按提交档位；不符（preview 回退�
 
   t.fireLatest(10000); // 再准备 s3
   const frameImg = t.imageEls[t.imageEls.length-1];
-  check('第二轮 s3 仍按档位 3 预载', t.mediaSrc(frameImg) === '/wallpaper-engine/scene-frame/s3?v=3',
+  check('第二轮 s3 仍按档位 3 预载（?ar= 是分桶取数参数，不参与档位判定）', (() => { const u = String(t.mediaSrc(frameImg) || '');
+      return u.split('?')[0] === '/wallpaper-engine/scene-frame/s3' && u.includes('v=3'); })(),
     'src=' + t.mediaSrc(frameImg));
   if (frameImg && typeof frameImg.onerror === 'function') frameImg.onerror(); // 提取失败 → preview 回退
   const previewImg = t.imageEls[t.imageEls.length-1];
