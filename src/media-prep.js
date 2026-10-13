@@ -385,7 +385,10 @@ function prepareSceneStaticStage(w, prep, onReady, onFail) {
   // 档位在准备与提交之间被改（理论上只有用户手动刷新）时 URL 仍会不符，
   // 校验照旧兜住重建。
   const savedVariant = Number(selection.frameVariants && selection.frameVariants[String(w.id)]) || 0;
-  const frameSrc = frameUrlWithVariant(w.frameUrl, savedVariant);
+  // 带 `?ar=`（本窗口视口比）：分桶宿主优先回**本形状**的帧，静态帧的构图与 live
+  // 一致（不带 ar 会退"旧单槽/任意桶"，多形状部署下拿到的是别的窗口的构图）。
+  const frameSrc = frameUrlWithAr(
+    frameUrlWithVariant(w.frameUrl, savedVariant), liveViewportAspect());
   const img = new Image();
   prep.probeMedia = img;
   img.onload = () => { adoptProbe(prep, { ready: true }); onReady(); };
@@ -630,7 +633,7 @@ function buildMedia(sel) {
     media = prepared || document.createElement("video");
     if (!prepared) {
       media.src = sel.sceneVideo;
-      media.poster = sel.url;   // frameUrl as poster
+      media.poster = frameUrlWithAr(sel.url, liveViewportAspect());   // frameUrl as poster
     }
     media.autoplay = true;
     media.loop = true;

@@ -951,6 +951,9 @@ await runScenario('P. 首帧前垫底图：抓帧 → 作者预览图 → 主题
   check('   来源已记录（诊断能看出退到哪一级；带 ?ar= 的分桶形态）',
     !!poster && String(poster.dataset.weFrameSrc || '').split('?')[0] === frameSrc,
     'weFrameSrc=' + (poster ? poster.dataset.weFrameSrc : 'no poster'));
+  check('   分桶形状声明：第 1 级探针 URL 带 ?ar=（缺了它多形状部署会拿到别的形状的帧）',
+    !!probeFrame && /[?&]ar=[0-9.]+/.test(String(t.mediaSrc(probeFrame))),
+    'src=' + (probeFrame ? t.mediaSrc(probeFrame) : 'none'));
   // 首次激活：抓帧不存在（这一轮 live 才回填）⇒ 必须退到作者预览图
   if (probeFrame && typeof probeFrame.onerror === 'function') probeFrame.onerror();
   const probePreview = t.imageEls.filter((i) => t.mediaSrc(i) === previewSrc).pop() || null;
@@ -1377,7 +1380,6 @@ await runScenario('P9. 留存表 LRU：命中搬到表尾 ⇒ 超上限淘汰的
 }, (t) => {
   const bytes = () => frameBytesPaths(t);
   const keys = () => (bytes() ? [...bytes().keys()] : []);
-  const urlFor = (src) => { for (const [u, s] of t.blobSources) if (s === src) return u; return ''; };
   const nextRound = () => {
     t.fireLatest(10000);            // 轮换 → 准备下一张（live 探测）
     t.fireLatest(300);              // 首拍 fps=0 → 未达标，轮询续跑

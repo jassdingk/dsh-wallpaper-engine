@@ -1131,6 +1131,7 @@ function scheduleLiveFrameBackfill(frame, opts) {
       // 撞 409 死结），分桶后本桶 409 只会撞上并发同形状窗口写的等价帧 —— 删失败
       // 也照样 PUT（撞上就是别人已写好），不再有"本轮放弃"。
       let clearedOld = true;
+      let forceErrorLatched = false; // force 的"明示失败"一旦落账，成功路径不得擦掉
       if (stale) {
         const del = await apiDelete(frameUrlWithAr("/scene-frame-cache/" + encodeURIComponent(token), arRef), { parse: true });
         // 只认 HTTP 层成败：200 + removed:false（本来就没有/已被并发清掉）也算清完。
@@ -1151,6 +1152,7 @@ function scheduleLiveFrameBackfill(frame, opts) {
       // force 且旧帧没删掉且 PUT 撞上了**还在的旧帧**：用户要的"换一张"没发生，
       // 必须明示失败（静默成功会让面板显示已重抓而画面纹丝不动）。
       if (ok && force && !clearedOld && put.status === 409) {
+        forceErrorLatched = true;
         forceFail(weT("旧实时帧删不掉（被占用或宿主报错）→ 没有换成新抓的这张，可稍后重试"));
       }
       // 槽位内容刚被替换：留存里那份字节已不对应盘上这张帧，撤掉（下一次建层重新取、重新留）。
@@ -1165,7 +1167,7 @@ function scheduleLiveFrameBackfill(frame, opts) {
       // 仍落在 token 自己的槽位，下次回到这张壁纸时面板探测自然会读到。
       if (settled && force) {
         gpuFrameUi.recapturing = false;
-        gpuFrameUi.error = "";
+        if (!forceErrorLatched) gpuFrameUi.error = ""; // 明示失败在屏：不得被成功路径擦掉
         try { emit(); } catch { /* ignore */ }
       }
       if (String(selection.id || "") !== backfillWid) return;
@@ -1173,7 +1175,7 @@ function scheduleLiveFrameBackfill(frame, opts) {
         // 缓存里已有（或刚写入）GPU 帧 → 面板提示「优先于全部档位」。
         markGpuFrameProbed(backfillWid, true);
         markGpuFramePin(token, true); // 该 token 槽位刚写入 GPU 帧：探测缓存同步生效，无需再探
-        if (recaptured) {
+        if (recaptured && !forceErrorLatched) {
           liveLog("gpu-frame-recaptured", "wid=" + backfillWid + " 已按当前视口重抓（" + recaptureSize + "）");
           // 屏上若正显示这张静帧（静态帧壁纸 / live 垫底 poster）→ 就地重挂取回新图。
           refreshStaticFrameNodes(token);

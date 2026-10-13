@@ -217,6 +217,11 @@ async function runPut(url, body) {
   return res;
 }
 async function runClear(url, method = 'DELETE') {
+  // 全清意图（裸 URL）自动补 `?all=1`：新契约里全清必须显式声明（评审 P2-4）。
+  // 带任何查询串的调用（?ar= / ?all=1 / 其它）按字面发，判据自己负责形状声明。
+  if (!url.includes('?')) {
+    url += '?all=1';
+  }
   const res = fakeRes();
   gpuRoute.handler({ url, headers: {}, method }, res);
   await new Promise((r) => setTimeout(r, 20));
@@ -295,7 +300,7 @@ if (token) {
     'status=' + h2After.__state.status);
 
   // ── 6. 并发写：异桶并行互不阻塞；同桶唯一性闸照旧 ─────────────────────────
-  await runClear('/wallpaper-engine/scene-frame-cache/' + token); // 清场：两桶都空
+  await runClear('/wallpaper-engine/scene-frame-cache/' + token + '?all=1'); // 清场：两桶都空（显式全清）
   const racedDiff = await Promise.all([
     runPut('/wallpaper-engine/scene-frame-cache/' + token, makePng(64, 64, 3)),
     runPut('/wallpaper-engine/scene-frame-cache/' + token, makePng(1440, 960, 4)),
@@ -322,6 +327,14 @@ if (token) {
   check('拒绝后没有产生任何新桶文件',
     readdirSync(TEST_FRAMES_DIR).filter((f) => f.startsWith(curKey + '_ar')).length === 2,
     readdirSync(TEST_FRAMES_DIR).filter((f) => f.startsWith(curKey + '_ar')).join(', '));
+  // 极端竖比（1×201 → round(0.004975×100)=0）⇒ 415 拒写（评审 P2-3：不留 _ar0 孤儿桶）。
+  const tallPng = makePng(1, 201, 9, 2048);
+  const putTall = await runPut('/wallpaper-engine/scene-frame-cache/' + token, tallPng);
+  check('PUT 1×201 极端竖比 → 415（桶号为 0 ⇒ 不落隐形桶）',
+    putTall.__state.status === 415, 'status=' + putTall.__state.status);
+  const headTall = await runHead('/wallpaper-engine/scene-frame/' + token + '?ar=0.005');
+  check('HEAD ?ar=0.005 ⇒ 404（零号桶不存在，也无残留文件）',
+    headTall.__state.status === 404, 'status=' + headTall.__state.status);
 
   // ── 8. 旧单槽（升级前产物）＝只读回退：GET 兜得住，HEAD 不冒充本桶 ────────
   await runClear('/wallpaper-engine/scene-frame-cache/' + token); // 全清（不带 ar）
@@ -338,8 +351,15 @@ if (token) {
   const putAfterLegacy = await runPut('/wallpaper-engine/scene-frame-cache/' + token, png1);
   check('旧单槽在场时 PUT 本桶 → 200（旧文件不挡新桶的写入）', putAfterLegacy.__state.status === 200,
     'status=' + putAfterLegacy.__state.status);
-  const fullClear = await runClear('/wallpaper-engine/scene-frame-cache/' + token);
-  check('不带 ar 的 DELETE = 全清：旧单槽与本视比桶一起消失',
+  // 保守 no-op（评审 P2-4 正对照）：既无 ?ar= 也无 ?all=1 ⇒ 200 + removed:false + noop 标记，文件全在。
+  const noopClear = await runClear('/wallpaper-engine/scene-frame-cache/' + token + '?probe=1');
+  check('无形状声明的 DELETE ⇒ 保守 no-op（不误删任何桶）',
+    noopClear.__state.status === 200 && /"removed":false/.test(String(noopClear.__state.body))
+      && /noop/.test(String(noopClear.__state.body))
+      && existsSync(legacyPath) && existsSync(bucketFile(B1)),
+    'status=' + noopClear.__state.status + ' body=' + String(noopClear.__state.body));
+  const fullClear = await runClear('/wallpaper-engine/scene-frame-cache/' + token + '?all=1');
+  check('?all=1 全清：旧单槽与本视比桶一起消失',
     fullClear.__state.status === 200 && /"removed":true/.test(String(fullClear.__state.body))
     && !existsSync(legacyPath) && !existsSync(bucketFile(B1)),
     'status=' + fullClear.__state.status);

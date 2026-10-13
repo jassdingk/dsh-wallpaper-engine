@@ -308,6 +308,9 @@ if (token) {
     return res;
   };
   const runClear = async (url, method = 'DELETE') => {
+    // 分桶契约：全清必须显式 `?all=1`（裸 DELETE 是保守 no-op）——本文件的 runClear
+    // 调用全是全清意图 ⇒ 裸 URL 自动补参；带查询串（?ar= / ?clear=1）按字面发。
+    if (!url.includes('?')) url += '?all=1';
     const req = { url, headers: {}, method };
     const res = fakeRes();
     gpuRoute.handler(req, res);
@@ -389,7 +392,7 @@ if (token) {
       clr.__state.status === 200 && /"removed":true/.test(String(clr.__state.body)), 'status=' + clr.__state.status);
     const clr2 = await runClear('/wallpaper-engine/scene-frame-cache/' + token, 'POST');
     check('POST 无 clear 参数 → 405（不误触发清除）', clr2.__state.status === 405, 'status=' + clr2.__state.status);
-    const clr3 = await runClear('/wallpaper-engine/scene-frame-cache/' + token + '?clear=1', 'POST');
+    const clr3 = await runClear('/wallpaper-engine/scene-frame-cache/' + token + '?clear=1&all=1', 'POST');
     check('POST ?clear=1 清除路径 → 200',
       clr3.__state.status === 200 && /"removed":false/.test(String(clr3.__state.body)), 'status=' + clr3.__state.status);
     const headAfterClear = await runHead('/wallpaper-engine/scene-frame/' + token);

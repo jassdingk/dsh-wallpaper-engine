@@ -1347,7 +1347,11 @@ function consumePreparedMedia(tag, wantUrl) {
   const want = String(wantUrl || "");
   if (want) {
     const src = String((el.attributes && el.attributes.src) || el.src || "");
-    if (src !== want) { disposeMediaEl(el); return null; } // 内容不符 → 释放后按目标 URL 重建
+    // `?ar=` 不参与身份比对：它是"这一刻窗口视口比"的取数参数（分桶宿主据此回
+    // 本形状的帧），随窗口变化，不该让探针与提交判成两份资产（否则窗口一缩放，
+    // 预载就白做、层反复重建）。档位 `?v=` 仍严格相等。
+    const stripAr = (u) => String(u || "").replace(/([?&])ar=[^&]*/g, "").replace(/\?$/, "");
+    if (stripAr(src) !== stripAr(want)) { disposeMediaEl(el); return null; } // 内容不符 → 释放后按目标 URL 重建
   }
   return el;
 }
@@ -4629,8 +4633,15 @@ function WallpaperPicker() {
     gpuFrameUi.busy = true;
     emit();
     // 带 `?ar=`（本窗口视口比）：只清**本视比桶** —— 别的桶属于别的窗口，越权清掉
-    // 就是把他们打回"缺帧回填"（分桶要消灭的乒乓）。
-    apiDelete(frameUrlWithAr("/scene-frame-cache/" + encodeURIComponent(token), liveViewportAspect()), { parse: true })
+    // 就是把他们打回"缺帧回填"（分桶要消灭的乒乓）。视口比判不了（无头/0 盒）时
+    // 改发显式 `?all=1` 全清：宿主对"无形状声明"的 DELETE 保守 no-op，全清必须
+    // 显式声明（评审 P2-4：别让"忘带参数"升级成越权抹除）。已知取舍：此处取窗口
+    // 盒比而回填落桶取 canvas 比——渲染器夹画布的极端场景下面板读写可能差一个
+    // 桶，靠 GET 最近桶回退兜底显示（评审 P2-5，暂不修）。
+    const clearAr = liveViewportAspect();
+    apiDelete(clearAr > 0
+      ? frameUrlWithAr("/scene-frame-cache/" + encodeURIComponent(token), clearAr)
+      : "/scene-frame-cache/" + encodeURIComponent(token) + "?all=1", { parse: true })
       .then((r) => {
         // 真·失败只有一种：宿主 500（unlink 被权限/占用挡住）。`removed:false`
         //（200）在桶语义下 = "本视比桶本来就没有" —— 目标态已达成，按成功走：
