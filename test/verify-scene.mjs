@@ -326,6 +326,9 @@ if (token) {
     // 残留的其它 key 文件，不算失败。版本取自上面从源码读出的 keyVersion，
     // 写死字面量会在宿主升键后静默测到旧文件（第 514 行的注释即此意）。
     const curKey = keyVersion + '_' + token + '_' + Math.round(statSync(join(fixtureItemDir, 'scene.pkg')).mtimeMs);
+    // 分桶产物名：<key>_ar<b>_gpu.png（b = round(视比×100)，桶号由 PNG 的 IHDR 推导）。
+    // 本段用的 gpuPng 是 64×64 ⇒ 桶 100。
+    const gpuBucketFile = (b) => curKey + '_ar' + b + '_gpu.png';
     const head0 = await runHead('/wallpaper-engine/scene-frame/' + token);
     check('HEAD 空槽（无抓帧、无自定义画面）→ 404 且不发 X-WE-GPU',
       head0.__state.status === 404 && head0.__state.headers['X-WE-GPU'] === undefined,
@@ -339,11 +342,11 @@ if (token) {
     check('PUT 魔数正确但无 IHDR/IEND → 415', putNoChunks.__state.status === 415, 'status=' + putNoChunks.__state.status);
     const putTooSmall = await runPut('/wallpaper-engine/scene-frame-cache/' + token, makePng(10));
     check('PUT 结构合法但过小（< 1KB 地板）→ 415', putTooSmall.__state.status === 415, 'status=' + putTooSmall.__state.status);
-    check('以上三次拒绝都没有落盘', !existsSync(join(cacheDir, curKey + '_gpu.png')), 'ok');
+    check('以上三次拒绝都没有落盘', !existsSync(join(cacheDir, gpuBucketFile(100))), 'ok');
     const put1 = await runPut('/wallpaper-engine/scene-frame-cache/' + token, gpuPng);
     check('PUT 合法 PNG → 200', put1.__state.status === 200, 'status=' + put1.__state.status);
-    const gpuFiles = readdirSync(cacheDir).filter((f) => f === curKey + '_gpu.png');
-    check('GPU frame stored as <key>_gpu.png (文件名即标记，可直接打开)',
+    const gpuFiles = readdirSync(cacheDir).filter((f) => f === gpuBucketFile(100));
+    check('GPU frame stored as <key>_ar<b>_gpu.png（按视比分桶，文件名即标记）',
       gpuFiles.length === 1, gpuFiles.join(', ') || 'missing');
     // v=4（强制自定义画面）：**豁免** GPU 抓帧 —— 用户显式 pin 的来源不被一张抓帧顶掉（§6.2/§6.7）。
     const getV4 = await runHandler(sceneRoute, '/wallpaper-engine/scene-frame/' + token + '?v=4');
@@ -376,9 +379,9 @@ if (token) {
     ]);
     const codes = raced.map((r) => r.__state.status).sort().join(',');
     check('三个并发 PUT 只有一个成功（唯一性闸串行化）', codes === '200,409,409', 'codes=' + codes);
-    const survivor = readdirSync(cacheDir).filter((f) => f === curKey + '_gpu.png').length;
+    const survivor = readdirSync(cacheDir).filter((f) => f === gpuBucketFile(100)).length;
     check('并发后磁盘上仍只有一份 GPU 帧', survivor === 1, 'count=' + survivor);
-    const noTmpLeft = readdirSync(cacheDir).filter((f) => f.startsWith(curKey + '_gpu.png.tmp')).length;
+    const noTmpLeft = readdirSync(cacheDir).filter((f) => f.startsWith(gpuBucketFile(100) + '.tmp')).length;
     check('并发写入未残留 .tmp 垃圾', noTmpLeft === 0, 'tmp=' + noTmpLeft);
     // 清除通道：DELETE（以及 POST ?clear=1）→ 可重新抓取。
     const clr = await runClear('/wallpaper-engine/scene-frame-cache/' + token);
@@ -454,7 +457,7 @@ if (token) {
         locked && locked.__state.status === 500 && /unlink-failed/.test(String(locked.__state.body)),
         'status=' + (locked && locked.__state.status) + ' body=' + String(locked && locked.__state.body).slice(0, 90));
       check('unlink 失败后 GPU 帧仍在盘上（清除确实没发生）',
-        readdirSync(cacheDir).filter((f) => f === curKey + '_gpu.png').length === 1);
+        readdirSync(cacheDir).filter((f) => f === gpuBucketFile(100)).length === 1);
       const headLocked = await runHead('/wallpaper-engine/scene-frame/' + token);
       check('unlink 失败后 HEAD 仍报 X-WE-GPU=1（与客户端所见一致）',
         headLocked.__state.status === 204 && headLocked.__state.headers['X-WE-GPU'] === '1',
@@ -861,7 +864,9 @@ if (token) {
   // `sceneFrameSlot` 曾返回 `pngPath` / `jpgPath` / `gifPath` / `dir` 与一个 `_vN` 档位后缀，
   // 而那些**都没有消费者**（静态帧提取线的遗留）；档位后缀还让"档 4"那次调用白做一次
   // `statSync` + `ensureFrameCacheDir()`。这条判据钉住"只有一个产物 + 档位语义不在槽位里"。
-  const DEAD_SLOT_FIELDS = ['pngPath', 'jpgPath', 'gifPath', 'slot.dir'];
+  // 分桶后槽位形状 = { key, dir, gpuPath（旧单槽，只读回退/全清对象）, bucketPath(ar) }；
+  // `dir` 自此是**合法字段**（桶枚举需要它），死字段名单里只剩三个历史猜图路径。
+  const DEAD_SLOT_FIELDS = ['pngPath', 'jpgPath', 'gifPath'];
   const slotDeadHits = (srcText) => DEAD_SLOT_FIELDS.filter((f) => srcText.includes(f));
   // 扫描面 = lib/**（死字段若从别处爬回来同样要红）。
   // ⚠️ **先剥注释再判**（规则 ⑦，用共享的字符串感知实现）：解释"这些字段为什么被删"的注释
@@ -881,7 +886,7 @@ if (token) {
     })(join(root, 'lib'));
     return out;
   })();
-  check('P4-16 槽位的死字段（pngPath / jpgPath / gifPath / dir）在 lib/ 里零残留',
+  check('P4-16 槽位的死字段（pngPath / jpgPath / gifPath）在 lib/ 里零残留',
     slotDeadHits(libSources.join('\n')).length === 0,
     slotDeadHits(libSources.join('\n')).join(', ') || '零残留');
   check('P4-16 negative control: 死字段判据有牙',
@@ -918,17 +923,19 @@ if (token) {
     return sawContent ? n : 0;
   };
   const slotRet = returnLiteral(slotBody);
-  check('P4-16 槽位返回**恰好两个字段**（key + gpuPath；加一个就红）',
-    fieldCount(slotRet) === 2,
+  check('P4-16 槽位返回**恰好四个字段**（key + dir + gpuPath + bucketPath；加/减一个就红）',
+    fieldCount(slotRet) === 4,
     slotRet ? 'fields=' + fieldCount(slotRet) + ' → ' + slotRet.replace(/\s+/g, ' ') : '取不到 return { … }');
   check('P4-16 negative control: 字段计数判据有牙',
     fieldCount('{ key, dir, gpuPath: 1 }') === 3 && fieldCount('{ key, gpuPath: 1 }') === 2
-    && fieldCount('{ key, gpuPath: join(dir, key + "_gpu.png") }') === 2);
+    && fieldCount('{ key, gpuPath: join(dir, key + "_gpu.png") }') === 2
+    && fieldCount('{ key, dir, gpuPath: join(dir, key + "_gpu.png"), bucketPath(ar) { return ""; } }') === 4);
   check('P4-16 sceneFrameSlot 不带档位参数、也不拼 `_v` 后缀（档位语义归调用方）',
     slotBody !== null && /function sceneFrameSlot\(\s*abs\s*\)/.test(slotBody) && !slotBody.includes("'_v'"),
     slotBody === null ? '锚点缺失' : 'arity-ok=' + /function sceneFrameSlot\(\s*abs\s*\)/.test(slotBody));
   check('P4-16 档 4 豁免抓帧时**不解析槽位**（不留那次白做的 statSync + ensureFrameCacheDir）',
-    /variant === 4 \? null : gpuFrameFileFor\(sceneFrameSlot\(abs\)\)/.test(readFileSync(join(root, 'lib', 'routes', 'scene-frame.js'), 'utf8')));
+    /const slot = variant === 4 \? null : sceneFrameSlot\(abs\);/.test(readFileSync(join(root, 'lib', 'routes', 'scene-frame.js'), 'utf8'))
+    && /const gpuFile = slot \? gpuFrameFileFor\(slot, ar\) : null;/.test(readFileSync(join(root, 'lib', 'routes', 'scene-frame.js'), 'utf8')));
 }
 
 // ── Level F: sceneVideo 文件版探测（issue #136）──────────────────────────────

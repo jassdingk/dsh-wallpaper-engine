@@ -19,7 +19,7 @@
  *                     rotationAudioHoldActive · scheduleSceneVideoResync
  *   live 与帧          livePauseReason · GPU_FRAME_ASPECT_TOL · gpuFrameAspectKnown ·
  *                     liveViewportAspect · probeGpuFrameState · markGpuFramePin · markGpuFrameProbed ·
- *                     clearGpuFrameSlot · refreshStaticFrameNodes · prepareSceneLiveStage ·
+ *                     refreshStaticFrameNodes · prepareSceneLiveStage ·
  *                     prepareSceneStaticStage · prepareLiveTimeouts · clearPrepareLiveTimeout ·
  *                     disposePreparedMedia · disposeMediaEl · buildMedia
  *   主题随壁纸        themeFollowOnFrameCanvas · themeFollowOnFrameImage（src/theme-follow.js）：抓到的
@@ -972,12 +972,13 @@ function scheduleLiveTransferRetry(wid, attempts) {
 // ── live GPU 抓帧回填静态帧缓存 ─────────────────────────────────────────────
 // 渲染页的显示 canvas 在 DOM 内（data-webwallgl-gl 标记）且 WebGL2 上下文带
 // preserveDrawingBuffer:true —— 父页面同源即可随时 toBlob 抓当前帧，无需渲染
-// 页/上游配合。首帧确认后 2.5s（实时画面进稳态）HEAD 探测静态帧槽位：
-// - 已有 GPU 帧（X-WE-GPU=1）→ 不动；
-// - 空槽（404）或已有自定义画面（204 + X-WE-GPU=0）→ 抓帧 PUT 回填：GPU 帧优先
-//   于自定义画面（host 每壁纸只接受一次 GPU 帧写入，见 /scene-frame-cache）。
+// 页/上游配合。首帧确认后 2.5s（实时画面进稳态）HEAD 探测静态帧槽位（带
+// `?ar=<本窗口视口比>`，只问**本视比桶**）：
+// - 本视比桶已有帧（X-WE-GPU=1）→ 不动（别的桶里有帧也与我无关，我不清也不读）；
+// - 本桶为空（404）或只有自定义画面（204 + X-WE-GPU=0）→ 抓帧 PUT 回填**自己的桶**：
+//   GPU 帧优先于自定义画面（host 对同桶去重写入，见 /scene-frame-cache）。
 // 失败路径会清 token，于是下一次 live 首帧（通常来自重新挂载）可以重试；
-// 成功/已被别人写入则保留 token，避免同一壁纸反复抓帧。
+// 成功/已被同形状窗口写入（409）则保留 token，避免同一壁纸反复抓帧。
 const LIVE_FRAME_BACKFILL_DELAY_MS = 2500;
 const LIVE_FRAME_BACKFILL_MIN_BYTES = 4096;
 // 空帧门禁（内容判定）：体积不可靠 —— headless Chrome 实测全黑 PNG：
@@ -1057,10 +1058,8 @@ function scheduleLiveFrameBackfill(frame, opts) {
   liveFrameBackfill.timer = window.setTimeout(() => {
     liveFrameBackfill.timer = 0;
     (async () => {
-      const head = await apiHead(src);
-      const hh = head.response;
-      const hasGpu = Boolean(head.ok && hh && hh.headers
-        && typeof hh.headers.get === "function" && hh.headers.get("x-we-gpu") === "1");
+      // canvas/arRef 先于 HEAD：`?ar=` 要的就是抓帧几何（canvas 被夹过比例时以
+      // canvas 为准，见下）——桶是按几何分的，问错形状等于白问。
       const win = frame.contentWindow;
       const doc = win && win.document;
       const canvas = doc && typeof doc.querySelector === "function"
@@ -1071,6 +1070,10 @@ function scheduleLiveFrameBackfill(frame, opts) {
       const canvasW = canvas ? Number(canvas.width) || 0 : 0;
       const canvasH = canvas ? Number(canvas.height) || 0 : 0;
       const arRef = canvasW > 0 && canvasH > 0 ? canvasW / canvasH : liveViewportAspect(frame);
+      const head = await apiHead(frameUrlWithAr(src, arRef));
+      const hh = head.response;
+      const hasGpu = Boolean(head.ok && hh && hh.headers
+        && typeof hh.headers.get === "function" && hh.headers.get("x-we-gpu") === "1");
       // 存帧几何：宿主从 PNG 的 IHDR 读（X-WE-GPU-AR）；旧宿主没有这个头时退回
       // 本会话抓帧时记下的比例，两者都没有 = 未知。
       let arStored = 0;
@@ -1082,13 +1085,20 @@ function scheduleLiveFrameBackfill(frame, opts) {
       // 留一张别处视口的帧则会让用户一直看到放大且被裁的构图。判不了当前几何
       // （arRef=0，如无头/极简环境）时反过来保守保留，避免无休止清写。
       // 用户手点「重新截」（force）时一律按需要重抓处理 —— 他就是要换一张。
+      // 分桶后本桶帧的 AR ≈ arRef（桶号就是按它分的，舍入误差 ≤0.3%）⇒ 这条
+      // 复核只在旧宿主/异常帧时触发，正常路径恒"保留"。
       const stale = force || (hasGpu && arRef > 0
         && (arStored <= 0 || Math.abs(arStored - arRef) > GPU_FRAME_ASPECT_TOL * arRef));
-      // 已有 GPU 帧且几何相符（含并发窗口里被别人写入）：无需抓帧，保留 token 免重复。
+      // 本桶已有帧且几何相符：无需抓帧，保留 token 免重复。
       if (hasGpu && !stale) {
         // 未知几何的保留要留痕：这是「没有头也没重抓」的唯一解释。
         if (arStored <= 0) liveLog("gpu-frame-keep-unknown", "wid=" + backfillWid + " 存帧视比未知 → 保留", "info", true);
         return true;
+      }
+      if (!hasGpu && arRef > 0) {
+        // 本视比桶为空：这是回填（而非清写）——别的桶有帧也轮不到我管。
+        liveLog("gpu-frame-slot-missing", "wid=" + backfillWid + " 本视比桶 ar"
+          + Math.round(arRef * 100) + " 无帧 → 抓帧回填", "info", true);
       }
       if (stale) {
         liveLog("gpu-frame-stale", "wid=" + backfillWid + " 存帧视比 "
@@ -1117,14 +1127,16 @@ function scheduleLiveFrameBackfill(frame, opts) {
       themeFollowOnFrameCanvas(canvas);
       // 清旧帧放在抓帧+门禁**之后**：先清后抓一旦抓帧失败（画面没出来/网络断）就
       // 只剩空槽 → 退回自定义画面/空态，比留一张旧构图的帧更糟（旧的至少是同一张壁纸）。
+      // 带 `?ar=` 只清**本视比桶**，且**尽力而为**：单槽时代清不掉必须放弃（PUT 必
+      // 撞 409 死结），分桶后本桶 409 只会撞上并发同形状窗口写的等价帧 —— 删失败
+      // 也照样 PUT（撞上就是别人已写好），不再有"本轮放弃"。
+      let clearedOld = true;
       if (stale) {
-        const cleared = await clearGpuFrameSlot(token);
-        if (!cleared) {
-          // 没删掉（权限/占用/宿主报错）→ PUT 也会 409，本帧没换成；清 token 让下
-          // 次挂载重试，并留痕（否则用户只看到构图依旧是旧的，没有任何线索）。
-          liveLog("gpu-frame-stale-blocked", "wid=" + backfillWid + " 旧帧未删除 → 本轮放弃，下次挂载重试");
-          if (force) forceFail(weT("旧实时帧删不掉（被占用或宿主报错）→ 没有改动它，可稍后重试"));
-          return false;
+        const del = await apiDelete(frameUrlWithAr("/scene-frame-cache/" + encodeURIComponent(token), arRef), { parse: true });
+        // 只认 HTTP 层成败：200 + removed:false（本来就没有/已被并发清掉）也算清完。
+        clearedOld = Boolean(del && del.ok);
+        if (!clearedOld) {
+          liveLog("gpu-frame-stale-keep", "wid=" + backfillWid + " 旧帧删除失败 → 仍尝试回填本桶", "info", true);
         }
         recaptured = true;
         recaptureSize = canvasW + "x" + canvasH;
@@ -1136,6 +1148,11 @@ function scheduleLiveFrameBackfill(frame, opts) {
       });
       // 200 写入成功 / 409 已被写入：两种都算「已定局」，不必重试。
       const ok = Boolean(put && (put.ok || put.status === 409));
+      // force 且旧帧没删掉且 PUT 撞上了**还在的旧帧**：用户要的"换一张"没发生，
+      // 必须明示失败（静默成功会让面板显示已重抓而画面纹丝不动）。
+      if (ok && force && !clearedOld && put.status === 409) {
+        forceFail(weT("旧实时帧删不掉（被占用或宿主报错）→ 没有换成新抓的这张，可稍后重试"));
+      }
       // 槽位内容刚被替换：留存里那份字节已不对应盘上这张帧，撤掉（下一次建层重新取、重新留）。
       if (ok) releaseFrameBytes(token);
       if (!ok && force) forceFail(weT("写入失败（宿主返回 {status}）", { status: put && put.status }));
@@ -1365,7 +1382,13 @@ function buildLivePoster(sel) {
   //   · 预览图是**作者随包发布的那张**，不是本插件合成的"猜图"（与 buildMedia 里 scene 静态
   //     img 的 onerror 回落同源）⇒ 不破「要么给真画面、要么诚实留空」那条裁定。
   // 顺序不能反：抓帧才是当前视口的真实构图，它一到就被顶掉；预览图只是"还没来得及出帧"的占位。
-  const candidates = (sel.type === "web" ? [sel.liveFrame, sel.previewUrl] : [sel.url, sel.previewUrl])
+  // 场景出图 URL 带 `?ar=`（本窗口视口比）：分桶宿主优先回**本形状**的帧，垫底构图
+  // 与 live 一致（不带 ar 也有最近桶/旧单槽回退，只是可能被 cover 多裁一次）。
+  // `weFrameSrc` 只做诊断记账、无方比对它（全仓仅写），带 ar 不影响任何判定。
+  const sceneFetchUrl = sel.type === "web" ? "" : frameUrlWithAr(sel.url, liveViewportAspect());
+  const candidates = (sel.type === "web"
+    ? [sel.liveFrame, sel.previewUrl]
+    : [sceneFetchUrl || sel.url, sel.previewUrl])
     .filter((s) => typeof s === "string" && s);
   if (!candidates.length) return poster;
   poster.dataset.weFrameSrc = candidates[0];
@@ -1376,8 +1399,9 @@ function buildLivePoster(sel) {
   // 第 1 级（实时帧）究竟是哪个候选：web 支没有 `liveFrame` 时**这一级不存在**（宿主发了这条
   // 字段，客户端却没有它的写入点 ⇒ web 的候选表里实际只剩预览图）。那种情况下不能把
   // `candidates[0]` 当成"实时帧已存在"记进来 —— 记下的会是缩略图，语义就假了。所以下面只认
-  // 「rank 0 且确实等于实时帧 URL」的那一个。
-  const frameSrc = sel.type === "web" ? (sel.liveFrame || "") : (sel.url || "");
+  // 「rank 0 且确实等于实时帧 URL」的那一个。scene 的比较基准用**同一个带 ar 的形态**
+  //（candidates[0] 正是它），否则恒判 -1、rank 0 永远不被记账。
+  const frameSrc = sel.type === "web" ? (sel.liveFrame || "") : (sceneFetchUrl || sel.url || "");
   const frameRank = frameSrc && candidates[0] === frameSrc ? 0 : -1;
   // **图恒盖色**：`background-image` 永远画在同一元素的 `background-color` 之上，且全仓只有
   // 上面那一处写底色 ⇒ 这里不存在"谁遮谁"，只有两件事要定：**谁允许上屏**与**什么时候发请求**。

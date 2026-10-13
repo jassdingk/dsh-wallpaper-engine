@@ -25,12 +25,14 @@ function assertChildren(children) {
 //   B 有画面 + 体积达标 → HEAD + PUT 全链走通，body 就是抓到的 blob；
 //   C 体积低于分辨率地板（1080p → 41472B）→ 不 PUT（判据是分辨率地板，不是固定字节闸）；
 //   D 槽位已有 GPU 帧且几何相符 → 连抓帧都不发生（缓存唯一性）；
-//   G 槽位已有 GPU 帧但几何不符（视比 1.5 vs 视口 1.7778）→ 先抓帧过门禁，再
-//     清槽、再 PUT（DELETE 必须早于 PUT）——「别的窗口/旧会话抓的帧」自愈；
+//   G 槽位已有 GPU 帧但几何不符（旧宿主 / 异常帧）→ 先抓帧过门禁，再
+//     清槽、再 PUT（DELETE 必须早于 PUT，且带 `?ar=` 只清本视比桶）——自愈；
 //   H 槽位已有 GPU 帧但宿主没回几何头（旧宿主）→ 按未知处理，同样清掉重抓；
-//   I 几何不符 + 清除失败（宿主 500）→ 不 PUT、不炸、下次挂载重试；
+//   I 几何不符 + 清除失败（宿主 500）→ 分桶后仍尝试 PUT（本桶 409 只会撞上
+//     并发同形状窗口写的等价帧，不再有"本轮放弃"死结）；不炸、可重试；
 //   J 几何不符但画面还没出来（黑帧门禁拦下）→ 不得清槽（先清后抓会留下空槽）；
 //   K 画布比 ≠ 窗口盒比（渲染器夹了画布尺寸）→ 基准取 canvas，不得反复清写。
+//   L 分桶形状声明：HEAD / DELETE 都带 `?ar=<本窗口视口比>`（宿主只对本视比桶操作）。
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
@@ -310,13 +312,15 @@ console.log('E. toBlob 抛错（tainted / 上下文异常）不炸');
   check('异常被兜住且不 PUT', r.putCalls.length === 0, 'put=' + r.putCalls.length);
 }
 
-console.log('G. 槽位已有 GPU 帧但几何不符（别的窗口/旧会话抓的）→ 清掉按当前视口重抓');
+console.log('G. 槽位已有 GPU 帧但几何不符（旧宿主/异常帧）→ 清掉本视比桶按当前视口重抓');
 {
   const r = await runScenario({ mode: 'varied', blobSize: 120000, gpuAlreadyPinned: true, gpuAspect: 1.5 });
-  check('清槽发生（DELETE /scene-frame-cache/<token>）',
-    r.clearCalls.length === 1 && r.clearCalls[0] === '/wallpaper-engine/scene-frame-cache/sss',
+  check('清槽发生（DELETE /scene-frame-cache/<token>?ar=…，只清本视比桶）',
+    r.clearCalls.length === 1 && r.clearCalls[0] === '/wallpaper-engine/scene-frame-cache/sss?ar=1.7778',
     'clear=' + r.clearCalls.length + (r.clearCalls[0] ? ' ' + r.clearCalls[0] : ''));
-  check('重抓并写入（PUT 一次）', r.putCalls.length === 1, 'put=' + r.putCalls.length);
+  check('重抓并写入（PUT 一次，PUT 不带桶号 —— 桶号以 PNG 真实几何为准）',
+    r.putCalls.length === 1 && r.putCalls[0].url === '/wallpaper-engine/scene-frame-cache/sss',
+    r.putCalls.length ? r.putCalls[0].url : 'none');
   check('顺序：先抓帧校验、再清槽、最后 PUT',
     r.slotOrder.join('>') === 'DELETE>PUT', r.slotOrder.join('>') || 'none');
 }
@@ -329,11 +333,13 @@ console.log('H. 槽位已有 GPU 帧但没有几何头（旧宿主）→ 按未�
     'clear=' + r.clearCalls.length + ' put=' + r.putCalls.length);
 }
 
-console.log('I. 几何不符但清除失败（宿主 500）→ 不 PUT、不炸、可重试');
+console.log('I. 几何不符但清除失败（宿主 500）→ 仍尝试回填本桶、不炸、可重试');
 {
   const r = await runScenario({ mode: 'varied', blobSize: 120000, gpuAlreadyPinned: true, gpuAspect: 1.5, clearFails: true });
   check('尝试过清除', r.clearCalls.length === 1, 'clear=' + r.clearCalls.length);
-  check('清除失败时不得 PUT（否则 409 假成功）', r.putCalls.length === 0, 'put=' + r.putCalls.length);
+  // 分桶后 DELETE 失败不再是死结：本桶 PUT 409 只会撞上并发同形状窗口写的等价帧
+  //（自动路径视 409 为已定局；force 路径在 409 时明示失败）⇒ PUT 照常发生。
+  check('清除失败仍 PUT（不再"本轮放弃"）', r.putCalls.length === 1, 'put=' + r.putCalls.length);
 }
 
 console.log('J. 几何不符但画面还没出来（黑帧门禁）→ 不得清槽');
@@ -354,6 +360,21 @@ console.log('K. 渲染器把画布比夹到别的比例（画布比 ≠ 窗口�
   check('画布比相符（盒比不符）→ 保留，不清不写',
     r.clearCalls.length === 0 && r.putCalls.length === 0,
     'clear=' + r.clearCalls.length + ' put=' + r.putCalls.length);
+}
+
+console.log('L. 分桶形状声明：HEAD / DELETE 带 `?ar=<本窗口视口比>`');
+{
+  // 分桶宿主只回答"本视比桶在不在"：不带形状的 HEAD 会把别人的帧当成自己的，
+  // 客户端就永远不知道要回填自己的形状。arRef 基准是抓帧 canvas（1920×1080）。
+  const r = await runScenario({ mode: 'varied', blobSize: 120000 });
+  const backfillHead = r.headCalls.find((u) => u.indexOf('scene-frame/sss') !== -1);
+  check('HEAD 带 ?ar=（视口 1920/1080 → 1.7778）',
+    Boolean(backfillHead) && backfillHead.indexOf('ar=1.7778') !== -1,
+    backfillHead || 'none');
+  const r2 = await runScenario({ mode: 'varied', blobSize: 120000, gpuAlreadyPinned: true, gpuAspect: 1.5 });
+  check('DELETE 带 ?ar=（只清本视比桶）',
+    r2.clearCalls.length === 1 && r2.clearCalls[0].indexOf('ar=1.7778') !== -1,
+    r2.clearCalls[0] || 'none');
 }
 
 console.log('F. P2-M：GPU 静帧落地后不得有任何 CPU 渲染（该路线已删除）');

@@ -173,9 +173,11 @@ const fetchNow = (url, opts) => {
   if (method === 'DELETE') {
     sceneFrameDeleteCalls.push(u);
     if (cccClearUnlinkFails) {
+      // 分桶后的宿主契约：unlink 真失败（权限/占用）= 500 + unlink-failed（不再有
+      // "200 + removed:false 的假成功"——200 现在 = 清除达成，含"本桶本来就没有"）。
       return Promise.resolve({
-        ok: true, status: 200,
-        json: () => Promise.resolve({ ok: true, removed: false, error: 'unlink-failed' }),
+        ok: false, status: 500,
+        json: () => Promise.resolve({ ok: false, removed: false, error: 'unlink-failed', code: 'EACCES' }),
       });
     }
     // 真宿主语义：DELETE 删掉 <key>_gpu.png → 之后 HEAD 回到 X-WE-GPU=0。
@@ -3183,16 +3185,16 @@ setTimeout(async () => {
     }
     const clearBtn = findBtn(tree3, '清除 GPU 帧');
     assert.ok(clearBtn, 'HEAD 报 X-WE-GPU=1 时面板必须给出「清除 GPU 帧」入口');
-    // ── P2-L：宿主回 200 但 removed:false（unlink 失败）时不得当清除成功 ──
-    // 只判 r.ok 会把「假成功」当清除：面板行消失、提示已清除，而宿主照旧发 GPU
-    // 帧 —— 画面纹丝不动、档位怎么点都不变、且没有任何反馈。
+    // ── P2-L：宿主 500（unlink 失败，权限/占用）时不得当清除成功 ──
+    // 分桶后 200 就是清除达成（含"本桶本来就没有"），真失败只剩 500：面板必须
+    // 保留入口 + 给出提示，而不是静默显示成功。
     cccClearUnlinkFails = true;
     const probesBeforeFail = animProbeSrcs.length;
     clearBtn.props.onClick();
     await new Promise((r) => setTimeout(r, 40));
     tree3 = renderPicker();
     assert.ok(findBtn(tree3, '清除 GPU 帧'),
-      'P2-L：宿主回 200 + removed:false 时必须保留清除入口（不得当清除成功）');
+      'P2-L：宿主 500 时必须保留清除入口（不得当清除成功）');
     assert.ok(JSON.stringify(tree3).includes('清除失败'),
       'P2-L：清除失败必须给出提示，而不是静默显示成功');
     assert.equal(animProbeSrcs.slice(probesBeforeFail).length, 0,
