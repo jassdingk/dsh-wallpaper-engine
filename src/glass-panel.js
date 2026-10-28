@@ -172,13 +172,18 @@ function renderGlassPresetsBlock(gp) {
     React.createElement("div", { className: "we-picker__hint", key: "pa-note" },
       weT("数值配置（开关 / 尺寸 / 圆角 / 颜色等）总是完整保存，不受勾选影响 —— 勾选只决定图片与字体要不要一并带走；不勾的那一族一个字都不动对方，勾了而本机没有 = 声明「无」（对方回到内置）。")),
   );
-  // 两行四列的圆角表格（用户口径）：每格 = 预设名（点击应用，占满）
-  // + 右侧固定删除键；不足 8 个的格子画虚框空位 —— 上限 8 直接看得见。
+  // 四列圆角表格（用户口径）：每格 = 预设名（点击应用，占满）
+  // + 右侧固定删除键；**用户层**上限 8 的空位画虚框 —— 但出厂层不占这 8 个名额
+  //（#219：出厂 7 套永远在清单里，把它们算进上限等于开局就少 7 个槽）。
+  // 所以格子数 = 出厂 + 用户，向上取整到 4 的倍数（至少 8 = 两行四列）。
   // ⚠️ armedId 是 **裸 id**（armedIdOf("gpreset") 已把族前缀剥掉，与 fontset-editor
   //    同一口径）—— 拿它和带前缀的令牌串比较永远不等 ⇒ 确认行永远不渲染
   //    （实测："点删除没反应"就是这个）。行为守卫：verify-presets ④。
+  const USER_PRESET_MAX = 8;
+  const userCount = rows.filter((r) => r.origin === "user").length;
+  const cellCount = Math.max(8, Math.ceil(rows.length / 4) * 4);
   const cells = [];
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < cellCount; i++) {
     const row = rows[i];
     if (!row) {
       cells.push(React.createElement("div", {
@@ -228,17 +233,18 @@ function renderGlassPresetsBlock(gp) {
   }
   const chipRow = React.createElement("div", { className: "we-picker__preset-grid", key: "gp-grid" }, cells);
   // 网格下方的**动作行**（不在格子里 —— 格子属于预设本身）：保存 / 导出 / 导入。
-  //   · 保存：满 8 个禁用并指路（删除腾位）；
+  //   · 保存：**用户层**满 8 个才禁用并指路（#219：出厂预设不占名额）；
   //   · 导出：**独立入口**（用户口径）—— 对话框里再选"导出哪一份"；
   //   · 导入：隐藏 file input + 按钮。
+  const userFull = userCount >= USER_PRESET_MAX;
   const openSaveRow = saving
     ? null
     : React.createElement("div", { className: "we-picker__ctl we-picker__ctl--wrap", key: "gp-save-open" },
       React.createElement("button", {
         className: "we-picker__btn", type: "button",
-        disabled: loading === true || rows.length >= 8,
-        title: rows.length >= 8
-          ? weT("已达预设上限（8 个）—— 删除不需要的预设后再存")
+        disabled: loading === true || userFull,
+        title: userFull
+          ? weT("你自己保存的预设已达上限（8 个）—— 删除不需要的预设后再存（出厂预设不占名额）")
           : weT("把当前这套整机配置存成一份你自己的预设（之后从预设行一键取回）"),
         onClick: () => onOpenSave(),
       }, weT("保存当前为预设…")),
@@ -356,7 +362,7 @@ function renderGlassPresetsBlock(gp) {
     : null;
   return React.createElement(React.Fragment, null,
     React.createElement("div", { className: "we-picker__ctl we-picker__ctl--wrap" },
-      ctlText(weT("预设方案"), weT("一键套用整套配置（出厂七套 + 你自己存的，上限 8 个）：观感、行为与勾选的字体 / 立绘 / 头像一起生效，应用后可继续微调")),
+      ctlText(weT("预设方案"), weT("一键套用整套配置（出厂七套 + 你自己最多再存 8 个）：观感、行为与勾选的字体 / 立绘 / 头像一起生效，应用后可继续微调")),
     ),
     loading ? React.createElement("div", { className: "we-picker__hint" }, weT("正在处理…")) : null,
     // ⚠️ reason 必须再过一次 weT：它可能来自宿主回包（lib/routes/presets.js 的中文 error），

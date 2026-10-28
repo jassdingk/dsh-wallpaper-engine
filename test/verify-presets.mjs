@@ -532,30 +532,61 @@ const OLD_TAG = 'dsh-we/glass-preset@1';
     [dup.__state.status, dupVariant.__state.status, dupBuiltin.__state.status].join('/'));
   check('409 带 error 信封（客户端显示处要原话）', typeof (bodyJson(dup) || {}).error === 'string');
 
-  // 上限 8：现在 8 个活跃（7 出厂 + 1 用户）⇒ 第 9 个 409
+  // 上限 8：**只算用户层**（#219：出厂 7 套不占名额 —— 否则开局就吃掉 7 个槽）。
+  const userCount = async () => ((await getList()).presets || []).filter((r) => r.origin === 'user').length;
+  // 先把用户层清到只剩基线（前面段落的探针会干扰"填满"这个前提）。
+  for (const r of ((await getList()).presets || [])) {
+    if (r.origin === 'user' && r.id !== 'preset-test-1') await del(r.id);
+  }
+  check('前置：用户层基线 1 个（preset-test-1）、出厂 7 套另计',
+    (await userCount()) === 1, '用户层=' + (await userCount()));
+  // 填满用户层 8 个。
+  let capGuard = 0;
+  while ((await userCount()) < 8 && capGuard < 12) {
+    const n = 'cap-filler-' + capGuard;
+    capGuard++;
+    const r = await create(n, {}, n);
+    if (r.__state.status !== 200) break;
+  }
+  check('前置：用户层已填满 8 个（出厂 7 套不占名额）', (await userCount()) === 8, '用户层=' + (await userCount()));
   const overCap = await create('超出上限的预设');
-  check('上限 8：第 9 个活跃预设 409（错误文案点明可删除腾位）',
-    overCap.__state.status === 409 && /8/.test((bodyJson(overCap) || {}).error || ''),
+  check('上限 8 只算用户层：第 9 个用户预设 409（文案点明出厂预设不占名额）',
+    overCap.__state.status === 409 && /8/.test((bodyJson(overCap) || {}).error || '')
+    && /出厂预设不占名额/.test((bodyJson(overCap) || {}).error || ''),
     (bodyJson(overCap) || {}).error);
 
-  // 删除一个出厂 ⇒ 腾出一格 ⇒ 创建放行（已删除的不占位）
+  // ★ #219 核心行为：删掉**出厂**预设**不**腾用户名额（出厂层本来就不占位）。
+  const beforeFactoryDel = ((await getList()).presets || []).length;
   const hide = await del('factory-frosted');
   list = await getList();
   check('出厂删除 200（清单少一行、无 hidden 形态；包内字节不变）',
     hide.__state.status === 200 && bodyJson(hide).origin === 'builtin'
-    && list.presets.length === 7 && !list.presets.some((r) => r.id === 'factory-frosted')
+    && list.presets.length === beforeFactoryDel - 1 && !list.presets.some((r) => r.id === 'factory-frosted')
     && !('hidden' in list)
     && dirDigest(BUILTIN) === digestBefore,
     'presets=' + list.presets.length);
+  const stillCapped = await create('删出厂后仍应被挡');
+  check('★ 删出厂预设不腾用户名额（出厂层不占位 ⇒ 上限照旧挡第 9 个）',
+    stillCapped.__state.status === 409, 'status=' + stillCapped.__state.status);
+  // 只有删掉**用户**预设才腾位。
+  const firstUser = (list.presets || []).find((r) => r.origin === 'user' && !r.broken);
+  await del(firstUser.id);
   const freed = await create('腾位后的新预设', {}, 'preset-freed-1');
-  check('删除腾位后创建放行（已删除的不占上限）', freed.__state.status === 200, 'status=' + freed.__state.status);
-  await del('preset-test-1'); // 释放旧位：腾位 + 同名测试要在 8 个活跃内完成
+  check('删用户预设腾位后创建放行（用户层才计入上限）', freed.__state.status === 200, 'status=' + freed.__state.status);
+  await del('preset-test-1'); // 释放旧位（若上面删的就是它则 404 no-op）
+  await del('preset-freed-1'); // 归还名额，给下面的同名 / 坏行段留空间
 
   // 删除期间名字放开：可以存一份叫「重磨砂」的（名字对比域只含活跃清单）
   const nameFreed = await create('重磨砂', { glassAlpha: 50 }, 'preset-rename-1');
   check('删除后出厂名字放开（同名创建 200）', nameFreed.__state.status === 200);
   await del('preset-rename-1');
-  await del('preset-freed-1');
+  // 清掉本段探针，回到「用户层 0 个」的基线，避免污染后面段落的上限前提。
+  for (const r of ((await getList()).presets || [])) {
+    if (r.origin === 'user') await del(r.id);
+  }
+  check('段末清理：用户层归零（出厂 6 套 —— frosted 已墓碑）',
+    (await userCount()) === 0 && ((await getList()).presets || []).length === 6,
+    '用户层=' + (await userCount()));
 
   // 不可恢复（口径）：删墓碑 = 复活的那条通道已封 —— 再删一次 404，
   // 清单依旧没有它；就算那个名字已经空出来，出厂预设也不会回来。
@@ -664,18 +695,20 @@ section('③c 坏预设可删 + 坏行计入上限（既存得进也清得掉，
     Boolean(badRow) && badRow.broken === 'version-obsolete'
     && (withBad.presets || []).length === countBefore + 1,
     '清单 ' + countBefore + ' → ' + (withBad.presets || []).length);
-  // 把现场推到边界：填到 8 个活跃（含那条坏行）。
+  // 上限 8 **只算用户层**（#219）：把用户层推到边界（含那条坏行）。
+  const userCount = async () => ((await getList()).presets || []).filter((r) => r.origin === 'user').length;
   let guard = 0;
-  while ((await countOf()) < 8 && guard++ < 12) {
-    const n = 'filler-' + (await countOf());
+  while ((await userCount()) < 8 && guard < 12) {
+    const n = 'filler-' + guard;
+    guard++;
     const r = await create(n, {}, n);
     if (r.__state.status !== 200) break;
   }
   const fullList = await getList();
-  check('前置：清单已达上限 8（含那条坏行）', (fullList.presets || []).length === 8,
-    (fullList.presets || []).filter((r) => r.broken).length + ' 条坏行');
+  check('前置：用户层已达上限 8（含那条坏行）', (await userCount()) === 8,
+    (fullList.presets || []).filter((r) => r.broken).length + ' 条坏行，用户层=' + (await userCount()));
   const blockedCreate = await create('坏行挡路的创建', {}, 'preset-blocked');
-  check('满额时创建 409（坏行占位 ⇒ 这正是缺陷的表现）',
+  check('满额时创建 409（坏行占**用户层**名额 ⇒ 这正是缺陷的表现）',
     blockedCreate.__state.status === 409, 'status=' + blockedCreate.__state.status);
   // ★ 核心：坏行必须**删得掉**（缺陷版返回 404 unknown preset ⇒ 永远删不掉）。
   const delBad = await del('preset-stuck-old');

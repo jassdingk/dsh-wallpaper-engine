@@ -67,7 +67,7 @@ const WE_I18N_HOST_EN = {
   "body 必须是 { name, values }": "Body must be { name, values }",
   "预设数量已达上限": "Preset limit reached",
   "已存在同名的预设（换个名字再存）": "A preset with the same name already exists (choose another name)",
-  "预设数量已达上限（最多 8 个 —— 删除不需要的预设腾位）": "Preset limit reached (8 max — delete presets you no longer need to free a slot)",
+  "你自己保存的预设已达上限（最多 8 个 —— 删除不需要的预设腾位；出厂预设不占名额）": "You have reached the limit of 8 saved presets — delete ones you no longer need to free a slot (factory presets do not take a slot)",
 
 };
 
